@@ -1,8 +1,8 @@
 from scipy.io import arff
 import numpy as np
 import time
-from skfeature.function.statistical_based import chi_square
-from skfeature.function.similarity_based import reliefF
+from sklearn.feature_selection import chi2
+from reliefF import reliefF
 
 def getKeyMinMaxDict(data, meta):
     keyMinMaxDict = {}
@@ -67,22 +67,21 @@ def getNormalizedData(data, meta, keyMinMaxDict, keyCategoriesDict):
             col = normalizeNumericFeature(data[colKey], min, max)
             features.append(col)
         else:
-            col = normalizeNominalFeature(data[colKey], keyCategoriesDict[colKey])
-            nomMat = []
-            for value in col:
-                row = []
-                for c in str(value):
-                    if int(c) == 0:
-                        row.append(0)
-                    else:
-                        row.append(np.divide(1, np.sqrt(2)))
-                nomMat.append(row)
-            nomMat = np.array(nomMat) 
             if colKey != meta.names()[-1]:
+                col = normalizeNominalFeature(data[colKey], keyCategoriesDict[colKey])
+                nomMat = []
+                for value in col:
+                    row = []
+                    for c in str(value):
+                        if int(c) == 0:
+                            row.append(0)
+                        else:
+                            row.append(np.divide(1, np.sqrt(2)))
+                    nomMat.append(row)
+                nomMat = np.array(nomMat)
                 features.append(nomMat)
             else:
-                classes = nomMat
-    
+                classes = data[colKey]
     resFeatures = []
     for el in features:
         if el.ndim == 2:
@@ -90,6 +89,7 @@ def getNormalizedData(data, meta, keyMinMaxDict, keyCategoriesDict):
                 resFeatures.append(col.T)
         else:
             resFeatures.append(el)
+    print(classes)
     features = np.array(resFeatures).T
     classes = np.array(classes)
     
@@ -148,9 +148,9 @@ def getKnn(CBproblems, problem, k, weights=None):
     return knnIndices, knnDistances
 
 def getFeatureWeights(CBproblems, CBsolutions, metric='chi_square'):
-    y = np.where(CBsolutions > 0)[1]
+    y = CBsolutions
     if metric == 'chi_square':
-        weights = chi_square.chi_square(CBproblems, y)
+        weights = chi2(CBproblems, y)
     if metric == 'reliefF':
         weights = reliefF.reliefF(CBproblems, y)
     weights = np.nan_to_num(weights)
@@ -173,11 +173,18 @@ def acbrAlgorithm(dataset, fold, k=5, alpha=0.2, featureSelect='chi_square'):
     goodnesses = np.array(goodnesses)
     CM = [goodnesses]
     for j in range(0, len(TCproblems)):
+        # Get the new problem
         cNew = TCproblems[j]
-        K = acbrRetrievalPhase(CBproblems, CBsolutions, cNew, k, featureSelect, weights)
+        # K phase
+        K = acbrRetrievalPhase(CBproblems,CBsolutions, cNew, k, featureSelect, weights)
+        # Reuse phase
         cSol = acbrReusePhase(cNew, K, CBsolutions)
+        # Revision phase
         confusionMatrix = acbrRevisionPhase(cSol, TCsolutions[j], confusionMatrix)
+        # Review phase
         CBproblems, CBsolutions, newGoodnesses, CM = acbrReviewPhase(CBproblems, CBsolutions, K, TCsolutions[j], CM, alpha)
+        #Retention phase
+        CBproblems, CBsolutions, CM = acbrRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
     accuracy = float(confusionMatrix[0]) / (confusionMatrix[0] + confusionMatrix[1])
     return CM, CBproblems, CBsolutions, accuracy
 
@@ -188,7 +195,7 @@ def acbrReusePhase(cNew, K, CBsolutions):
     return CBsolutions[K[0]]
 
 def acbrRevisionPhase(cSol, correctSol, confusionMatrix):
-    if getDistance(cSol, correctSol) == 0:
+    if cSol == correctSol:
         confusionMatrix[0] += 1
     else:
         confusionMatrix[1] += 1
@@ -201,7 +208,10 @@ def acbrReviewPhase(CBproblems, CBsolutions, K, cNewClass, CM, alpha):
         newGoodnesses.append(goodness)
     for k in K:
         cKClass = CBsolutions[k]
-        r = getDistance(cKClass, cNewClass)
+        if cKClass == cNewClass:
+            r = 0
+        else:
+            r = 1
         g = lastGoodnesses[k]
         newGoodnesses[k] = g + alpha * (r - g)
     newGoodnesses = np.array(newGoodnesses)
@@ -222,6 +232,76 @@ def oblivionByGoodnessFS(K, CM, CBproblems, CBsolutions, newGoodnesses):
     CM[0] = np.delete(CM[0], deleteRows, axis=0)
     
     return CBproblems, CBsolutions, newGoodnesses, CM
+
+
+# # # # # # # # # # # # # # #
+
+def acbrRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM, policy="MG"):
+    if policy == "NR":
+        return acbrNoRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
+    elif policy == "AR":
+        return acbrAlwaysRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
+    elif policy == "DD":
+        return acbrDDRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
+    elif policy == "MG":
+        return acbrMGRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
+
+def acbrNoRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM):
+    return CBproblems, CBsolutions, CM
+
+def acbrAlwaysRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM):
+    CBproblems = np.vstack([CBproblems,cNew])
+    CBsolutions = np.append(CBsolutions,cSol)
+    CM[0] = np.append(CM[0],0.5)
+    CM[1] = np.append(CM[1], 0.5)
+    return CBproblems, CBsolutions, CM
+
+# There is a big problem here, if there is oblivion, the indexes in K are no-longer valid
+def acbrDDRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM):
+    # count classes in CBj
+    C = len(np.unique(CBsolutions))
+    (values,counts) = np.unique(CBsolutions[K],return_counts=True)
+    maxcount= np.argmax(counts)
+    
+    MK_module = counts[maxcount]
+    MC=values[maxcount]
+    
+    MK=CBproblems[np.array(K)[CBsolutions[K] == MC]]
+    
+    disagreement = (len(K) - MK_module)/((C-1)*MK_module)
+    
+    if disagreement >= 0.3: # Threshold in this case is 0.3
+        goodness = (CM[1][np.array(K)[CBsolutions[K] == MC]]).max()
+        CBproblems = np.vstack([CBproblems,cNew])
+        CBsolutions = np.append(CBsolutions,cSol)
+        CM[0] = np.append(CM[0], goodness)
+        CM[1] = np.append(CM[1], goodness)
+    return CBproblems, CBsolutions, CM
+
+# There is a big problem here, if there is oblivion, the indexes in K are no-longer valid
+def acbrMGRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM):
+    (values,counts) = np.unique(CBsolutions[K],return_counts=True)
+    maxcount= np.argmax(counts)
+    
+    MK_module = counts[maxcount]
+    MC=values[maxcount]
+    
+    MK=CBproblems[np.array(K)[CBsolutions[K] == MC]]
+    goodness = (CM[1][np.array(K)[CBsolutions[K] == MC]]).max()
+    G_MC = (CM[1][[CBsolutions == MC]])
+    g_max = G_MC.max()
+    g_min = G_MC.min();
+    
+    threshold = (g_max+g_min)/2
+    
+    if goodness <= threshold:
+        CBproblems = np.vstack([CBproblems,cNew])
+        CBsolutions = np.append(CBsolutions,cSol)
+        CM[0] = np.append(CM[0], goodness)
+        CM[1] = np.append(CM[1], goodness)
+    return CBproblems, CBsolutions, CM
+
+# # # # # # # # # # # # # # #
 
 def crossValidation(dataset, folds, k, featureSelect):
     accuracies = []
