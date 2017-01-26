@@ -2,7 +2,7 @@ from scipy.io import arff
 import numpy as np
 import time
 from sklearn.feature_selection import chi2
-from reliefF import reliefF
+from skfeature.function.similarity_based import reliefF
 
 def getKeyMinMaxDict(data, meta):
     keyMinMaxDict = {}
@@ -89,7 +89,6 @@ def getNormalizedData(data, meta, keyMinMaxDict, keyCategoriesDict):
                 resFeatures.append(col.T)
         else:
             resFeatures.append(el)
-    print(classes)
     features = np.array(resFeatures).T
     classes = np.array(classes)
     
@@ -160,7 +159,7 @@ def getFeatureWeights(CBproblems, CBsolutions, metric='chi_square'):
     weights = np.divide(weights, (max-min))
     return weights
 
-def acbrAlgorithm(dataset, fold, k=5, alpha=0.2, featureSelect='chi_square'):
+def acbrAlgorithm(dataset, fold, k=5, alpha=0.2, featureSelect='chi_square',  retention='AR', useOblivion=True):
     (CBproblems, CBsolutions, TCproblems, TCsolutions) = dataToCaseAndTestBase(dataset, fold)
 
     weights = None
@@ -171,20 +170,26 @@ def acbrAlgorithm(dataset, fold, k=5, alpha=0.2, featureSelect='chi_square'):
     # print('Initial case base size: ' + str(CBproblems.shape))
     goodnesses = [0.5] * len(CBproblems)
     goodnesses = np.array(goodnesses)
-    CM = [goodnesses]
+    CM = [goodnesses, goodnesses]
     for j in range(0, len(TCproblems)):
         # Get the new problem
         cNew = TCproblems[j]
+        
         # K phase
         K = acbrRetrievalPhase(CBproblems,CBsolutions, cNew, k, featureSelect, weights)
+        
         # Reuse phase
         cSol = acbrReusePhase(cNew, K, CBsolutions)
+        
         # Revision phase
         confusionMatrix = acbrRevisionPhase(cSol, TCsolutions[j], confusionMatrix)
+        
         # Review phase
-        CBproblems, CBsolutions, newGoodnesses, CM = acbrReviewPhase(CBproblems, CBsolutions, K, TCsolutions[j], CM, alpha)
+        newCBproblems, newCBsolutions, newCM = acbrReviewPhase(CBproblems, CBsolutions, K, TCsolutions[j], CM, alpha, useOblivion)
+        
         #Retention phase
-        CBproblems, CBsolutions, CM = acbrRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
+        CBproblems, CBsolutions, CM = acbrRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, newCBproblems, newCBsolutions, CM, newCM, policy=retention)
+
     accuracy = float(confusionMatrix[0]) / (confusionMatrix[0] + confusionMatrix[1])
     return CM, CBproblems, CBsolutions, accuracy
 
@@ -201,7 +206,7 @@ def acbrRevisionPhase(cSol, correctSol, confusionMatrix):
         confusionMatrix[1] += 1
     return confusionMatrix
 
-def acbrReviewPhase(CBproblems, CBsolutions, K, cNewClass, CM, alpha):
+def acbrReviewPhase(CBproblems, CBsolutions, K, cNewClass, CM, alpha, useOblivion):
     lastGoodnesses = CM[-1]
     newGoodnesses = []
     for goodness in lastGoodnesses:
@@ -215,10 +220,14 @@ def acbrReviewPhase(CBproblems, CBsolutions, K, cNewClass, CM, alpha):
         g = lastGoodnesses[k]
         newGoodnesses[k] = g + alpha * (r - g)
     newGoodnesses = np.array(newGoodnesses)
-    CBproblems, CBsolutions, newGoodnesses, CM = oblivionByGoodnessFS(K, CM, CBproblems, CBsolutions, newGoodnesses)
-    CM.append(newGoodnesses)
-    CM = [CM[0], newGoodnesses]
-    return CBproblems, CBsolutions, newGoodnesses, CM
+    if useOblivion:
+        CBproblems, CBsolutions, newGoodnesses, newCM = oblivionByGoodnessFS(K, CM, CBproblems, CBsolutions, newGoodnesses)
+    else:
+        newCM = []
+        newCM.append(CM[0])
+    newCM.append(newGoodnesses)
+    newCM = [CM[0], newGoodnesses]
+    return CBproblems, CBsolutions, newCM
     
 def oblivionByGoodnessFS(K, CM, CBproblems, CBsolutions, newGoodnesses):
     firstGoodnesses = CM[0]
@@ -229,34 +238,40 @@ def oblivionByGoodnessFS(K, CM, CBproblems, CBsolutions, newGoodnesses):
     CBproblems = np.delete(CBproblems, deleteRows, axis=0)
     CBsolutions = np.delete(CBsolutions, deleteRows, axis=0)
     newGoodnesses = np.delete(newGoodnesses, deleteRows, axis=0)
-    CM[0] = np.delete(CM[0], deleteRows, axis=0)
+    newCM = []
+    newCM.append(CM[0])
+    newCM[0] = np.delete(CM[0], deleteRows, axis=0)
     
-    return CBproblems, CBsolutions, newGoodnesses, CM
+    return CBproblems, CBsolutions, newGoodnesses, newCM
 
 
 # # # # # # # # # # # # # # #
 
-def acbrRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM, policy="MG"):
+def acbrRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, newCBproblems, newCBsolutions, CM, newCM, policy="NR"):
     if policy == "NR":
-        return acbrNoRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
+        result =  acbrNoRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
     elif policy == "AR":
-        return acbrAlwaysRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
+        result =  acbrAlwaysRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
     elif policy == "DD":
-        return acbrDDRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
+        result =  acbrDDRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
     elif policy == "MG":
-        return acbrMGRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
+        result =  acbrMGRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM)
+    if type(result) != type(None):
+        newCBproblems = np.vstack([newCBproblems,result[0]])
+        newCBsolutions = np.append(newCBsolutions,result[1])
+        newCM[0] = np.append(newCM[0], result[2])
+        newCM[1] = np.append(newCM[1], result[2])
+    return newCBproblems, newCBsolutions, newCM
+
+
+
 
 def acbrNoRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM):
-    return CBproblems, CBsolutions, CM
+    return None
 
 def acbrAlwaysRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM):
-    CBproblems = np.vstack([CBproblems,cNew])
-    CBsolutions = np.append(CBsolutions,cSol)
-    CM[0] = np.append(CM[0],0.5)
-    CM[1] = np.append(CM[1], 0.5)
-    return CBproblems, CBsolutions, CM
+    return (cNew, cSol, 0.5)
 
-# There is a big problem here, if there is oblivion, the indexes in K are no-longer valid
 def acbrDDRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM):
     # count classes in CBj
     C = len(np.unique(CBsolutions))
@@ -267,18 +282,14 @@ def acbrDDRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM):
     MC=values[maxcount]
     
     MK=CBproblems[np.array(K)[CBsolutions[K] == MC]]
-    
-    disagreement = (len(K) - MK_module)/((C-1)*MK_module)
-    
+
+    normCK = np.max((2,len(values)))
+    disagreement = float(len(K) - MK_module)/((normCK-1)*MK_module)
     if disagreement >= 0.3: # Threshold in this case is 0.3
         goodness = (CM[1][np.array(K)[CBsolutions[K] == MC]]).max()
-        CBproblems = np.vstack([CBproblems,cNew])
-        CBsolutions = np.append(CBsolutions,cSol)
-        CM[0] = np.append(CM[0], goodness)
-        CM[1] = np.append(CM[1], goodness)
-    return CBproblems, CBsolutions, CM
+        return (cNew, cSol, goodness)
+    return None
 
-# There is a big problem here, if there is oblivion, the indexes in K are no-longer valid
 def acbrMGRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM):
     (values,counts) = np.unique(CBsolutions[K],return_counts=True)
     maxcount= np.argmax(counts)
@@ -295,27 +306,24 @@ def acbrMGRetentionPhase(cNew, cSol, K, CBproblems, CBsolutions, CM):
     threshold = (g_max+g_min)/2
     
     if goodness <= threshold:
-        CBproblems = np.vstack([CBproblems,cNew])
-        CBsolutions = np.append(CBsolutions,cSol)
-        CM[0] = np.append(CM[0], goodness)
-        CM[1] = np.append(CM[1], goodness)
-    return CBproblems, CBsolutions, CM
+        return (cNew, cSol, goodness)
+    return None
 
 # # # # # # # # # # # # # # #
 
-def crossValidation(dataset, folds, k, featureSelect):
+def crossValidation(dataset, folds, k=5, featureSelect=None, retention='AR', useOblivion=True):
     accuracies = []
     efficiencies = []
     finalCaseBaseSizes = []
     for s in range(0, folds):
-        print('Fold ' + str(s+1) + '...')
+        # print('Fold ' + str(s+1) + '...')
         start = time.time()
-        CM, CBproblems, CBsolutions, accuracy = acbrAlgorithm(dataset, s, k=k, featureSelect=featureSelect)
+        CM, CBproblems, CBsolutions, accuracy = acbrAlgorithm(dataset, s, k=k, featureSelect=featureSelect, retention=retention, useOblivion=useOblivion)
         end = time.time()
-        print('acbrAlgorithm terminated after ' +str(end-start) + ' seconds')
+        # print('acbrAlgorithm terminated after ' +str(end-start) + ' seconds')
         # print('New case base size: ' + str(CBproblems.shape))
         # print('accuracy: ' + str(accuracy))
-        print('- ' * 30)
+        # print('- ' * 30)
         accuracies.append(accuracy)
         efficiencies.append(end-start)
         finalCaseBaseSizes.append(len(CBproblems))
@@ -323,7 +331,25 @@ def crossValidation(dataset, folds, k, featureSelect):
 
 # # # # # # # # # # # # # # # start executing here:      
 
-accuracies, efficiencies, finalCaseBaseSizes = crossValidation('pen-based', 10, k=5, featureSelect='chi_square')
-print(np.mean(accuracies))
-print(np.mean(efficiencies))
-print(np.mean(finalCaseBaseSizes))
+dataset = 'pen-based' # vowel audiology
+KS = [3, 5, 7]
+RS = ['NR', 'DD', 'MG', 'AR'] 
+OS = [True, False]
+f = None # 'reliefF' 'chi_squared'
+
+print(dataset)
+print('k\tf\tr\to\taccuracy\tefficiency\tCB size')
+
+for k in KS:
+    for o in OS:
+        for r in RS:
+            accuracies, efficiencies, finalCaseBaseSizes = crossValidation(dataset, 10, k=k, featureSelect=f, retention=r, useOblivion=o)
+            s = ''
+            s += str(k) + '\t'
+            s += str(f) + '\t'
+            s += str(r) + '\t'
+            s += str(o) + '\t'
+            s += str(np.mean(accuracies)) + '\t'
+            s += str(np.mean(efficiencies)) + '\t'
+            s += str(np.mean(finalCaseBaseSizes))
+            print(s)
